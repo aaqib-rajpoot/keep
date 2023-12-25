@@ -24,6 +24,8 @@ class ProviderConfigurationException(Exception):
 
 
 class ProvidersFactory:
+    _loaded_providers_cache = None
+
     @staticmethod
     def get_provider_class(provider_type: str) -> BaseProvider:
         provider_type_split = provider_type.split(
@@ -157,13 +159,19 @@ class ProvidersFactory:
         Returns:
             list: All the providers.
         """
+        logger = logging.getLogger(__name__)
+        # use the cache if exists
+        if ProvidersFactory._loaded_providers_cache:
+            logger.info("Using cached providers")
+            return ProvidersFactory._loaded_providers_cache
+
+        logger.info("Loading providers")
         providers = []
         blacklisted_providers = [
             "base_provider",
             "mock_provider",
             "file_provider",
             "github_workflows_provider",
-            "github_provider",  # TODO: github provider doesn't do anything, remove this when it's refactored
         ]
 
         for provider_directory in os.listdir(
@@ -277,8 +285,12 @@ class ProvidersFactory:
                     )
                 )
             except ModuleNotFoundError:
-                logger.exception(f"Cannot import provider {provider_directory}")
+                logger.error(
+                    f"Cannot import provider {provider_directory}, module not found."
+                )
                 continue
+
+        ProvidersFactory._loaded_providers_cache = providers
         return providers
 
     @staticmethod

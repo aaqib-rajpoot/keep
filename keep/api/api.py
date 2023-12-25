@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+from importlib import metadata
 
 import jwt
 import requests
@@ -9,6 +10,7 @@ import uvicorn
 from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette_context import plugins
@@ -17,7 +19,7 @@ from starlette_context.middleware import RawContextMiddleware
 import keep.api.logging
 import keep.api.observability
 from keep.api.core.config import AuthenticationType
-from keep.api.core.db import create_db_and_tables, get_user, try_create_single_tenant
+from keep.api.core.db import get_user
 from keep.api.core.dependencies import (
     SINGLE_TENANT_UUID,
     get_user_email,
@@ -31,11 +33,12 @@ from keep.api.core.dependencies import (
 )
 from keep.api.logging import CONFIG as logging_config
 from keep.api.routes import (
-    ai,
     alerts,
     healthcheck,
+    preset,
     providers,
     pusher,
+    rules,
     settings,
     status,
     tenant,
@@ -55,12 +58,18 @@ PORT = int(os.environ.get("PORT", 8080))
 SCHEDULER = os.environ.get("SCHEDULER", "true") == "true"
 CONSUMER = os.environ.get("CONSUMER", "true") == "true"
 AUTH_TYPE = os.environ.get("AUTH_TYPE", AuthenticationType.NO_AUTH.value)
+try:
+    KEEP_VERSION = metadata.version("keep")
+except Exception:
+    KEEP_VERSION = os.environ.get("KEEP_VERSION", "unknown")
+POSTHOG_API_ENABLED = os.environ.get("ENABLE_POSTHOG_API", "false") == "true"
 
 
 class EventCaptureMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: FastAPI):
         super().__init__(app)
         self.posthog_client = get_posthog_client()
+        self.tracer = trace.get_tracer(__name__)
 
     def _extract_identity(self, request: Request) -> str:
         try:
@@ -70,45 +79,56 @@ class EventCaptureMiddleware(BaseHTTPMiddleware):
         except Exception:
             return "anonymous"
 
-    def capture_request(self, request: Request) -> None:
-        identity = self._extract_identity(request)
-        self.posthog_client.capture(
-            identity,
-            "request-started",
-            {"path": request.url.path, "method": request.method},
-        )
+    async def capture_request(self, request: Request) -> None:
+        if POSTHOG_API_ENABLED:
+            identity = self._extract_identity(request)
+            with self.tracer.start_as_current_span("capture_request"):
+                self.posthog_client.capture(
+                    identity,
+                    "request-started",
+                    {
+                        "path": request.url.path,
+                        "method": request.method,
+                        "keep_version": KEEP_VERSION,
+                    },
+                )
 
-    def capture_response(self, request: Request, response: Response) -> None:
-        identity = self._extract_identity(request)
-        self.posthog_client.capture(
-            identity,
-            "request-finished",
-            {
-                "path": request.url.path,
-                "method": request.method,
-                "status_code": response.status_code,
-            },
-        )
+    async def capture_response(self, request: Request, response: Response) -> None:
+        if POSTHOG_API_ENABLED:
+            identity = self._extract_identity(request)
+            with self.tracer.start_as_current_span("capture_response"):
+                self.posthog_client.capture(
+                    identity,
+                    "request-finished",
+                    {
+                        "path": request.url.path,
+                        "method": request.method,
+                        "status_code": response.status_code,
+                        "keep_version": KEEP_VERSION,
+                    },
+                )
 
-    def flush(self):
-        logger.info("Flushing Posthog events")
-        self.posthog_client.flush()
-        logger.info("Posthog events flushed")
+    async def flush(self):
+        if POSTHOG_API_ENABLED:
+            with self.tracer.start_as_current_span("flush_posthog_events"):
+                logger.info("Flushing Posthog events")
+                self.posthog_client.flush()
+                logger.info("Posthog events flushed")
 
     async def dispatch(self, request: Request, call_next):
         # Skip OPTIONS requests
         if request.method == "OPTIONS":
             return await call_next(request)
         # Capture event before request
-        self.capture_request(request)
+        await self.capture_request(request)
 
         response = await call_next(request)
 
         # Capture event after request
-        self.capture_response(request, response)
+        await self.capture_response(request, response)
 
         # Perform async tasks or flush events after the request is handled
-        self.flush()
+        await self.flush()
         return response
 
 
@@ -139,7 +159,6 @@ def get_app(
     app.include_router(providers.router, prefix="/providers", tags=["providers"])
     app.include_router(healthcheck.router, prefix="/healthcheck", tags=["healthcheck"])
     app.include_router(tenant.router, prefix="/tenant", tags=["tenant"])
-    app.include_router(ai.router, prefix="/ai", tags=["ai"])
     app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
     app.include_router(settings.router, prefix="/settings", tags=["settings"])
     app.include_router(
@@ -148,6 +167,8 @@ def get_app(
     app.include_router(whoami.router, prefix="/whoami", tags=["whoami"])
     app.include_router(pusher.router, prefix="/pusher", tags=["pusher"])
     app.include_router(status.router, prefix="/status", tags=["status"])
+    app.include_router(rules.router, prefix="/rules", tags=["rules"])
+    app.include_router(preset.router, prefix="/preset", tags=["preset"])
 
     # if its single tenant with authentication, add signin endpoint
     logger.info(f"Starting Keep with authentication type: {AUTH_TYPE}")
@@ -204,9 +225,6 @@ def get_app(
 
     @app.on_event("startup")
     async def on_startup():
-        if not os.environ.get("SKIP_DB_CREATION", "false") == "true":
-            create_db_and_tables()
-
         # When running in mode other than multi tenant auth, we want to override the secured endpoints
         if AUTH_TYPE != AuthenticationType.MULTI_TENANT.value:
             app.dependency_overrides[verify_api_key] = verify_api_key_single_tenant
@@ -217,7 +235,20 @@ def get_app(
             app.dependency_overrides[
                 verify_token_or_key
             ] = verify_token_or_key_single_tenant
-            try_create_single_tenant(SINGLE_TENANT_UUID)
+
+        # load all providers into cache
+        from keep.providers.providers_factory import ProvidersFactory
+
+        logger.info("Loading providers into cache")
+        ProvidersFactory.get_all_providers()
+        logger.info("Providers loaded successfully")
+
+        # We want to start all internal services (workflowmanager, eventsubscriber, etc) only after the server is up
+        # so we init a thread that will wait for the server to be up and then start the internal services
+        # start the internal services
+        logger.info("Starting the run services thread")
+        thread = threading.Thread(target=run_services_after_app_is_up)
+        thread.start()
 
     @app.exception_handler(Exception)
     async def catch_exception(request: Request, exc: Exception):
@@ -233,14 +264,14 @@ def get_app(
             },
         )
 
+    @app.middleware("http")
+    async def log_middeware(request: Request, call_next):
+        logger.info(f"Request started: {request.method} {request.url.path}")
+        response = await call_next(request)
+        logger.info(f"Request finished: {request.method} {request.url.path}")
+        return response
+
     keep.api.observability.setup(app)
-
-    if os.environ.get("USE_NGROK", "false") == "true":
-        from pyngrok import ngrok
-
-        public_url = ngrok.connect(PORT).public_url
-        logger.info(f"ngrok tunnel: {public_url}")
-        os.environ["KEEP_API_URL"] = public_url
 
     return app
 
@@ -286,12 +317,12 @@ def _wait_for_server_to_be_ready():
 
 
 def run(app: FastAPI):
-    # We want to start all internal services (workflowmanager, eventsubscriber, etc) only after the server is up
-    # so we init a thread that will wait for the server to be up and then start the internal services
-    logger.info("Starting the run services thread")
-    thread = threading.Thread(target=run_services_after_app_is_up)
-    thread.start()
     logger.info("Starting the uvicorn server")
+    # call on starting to create the db and tables
+    import keep.api.config
+
+    keep.api.config.on_starting()
+
     # run the server
     uvicorn.run(
         app,

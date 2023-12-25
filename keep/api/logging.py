@@ -67,7 +67,7 @@ CONFIG = {
     "disable_existing_loggers": False,
     "formatters": {
         "json": {
-            "format": "%(asctime)s %(message)s %(levelname)s %(name)s %(filename)s %(otelTraceID)s %(otelSpanID)s %(otelServiceName)s",
+            "format": "%(asctime)s %(message)s %(levelname)s %(name)s %(filename)s %(otelTraceID)s %(otelSpanID)s %(otelServiceName)s %(threadName)s %(process)s",
             "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
         }
     },
@@ -85,7 +85,18 @@ CONFIG = {
         },
     },
     "loggers": {
-        "": {"handlers": ["default", "context"], "level": LOG_LEVEL, "propagate": False}
+        "": {
+            "handlers": ["default", "context"],
+            "level": LOG_LEVEL,
+            "propagate": False,
+        },
+        # shut the open telemetry logger down since it keep pprints  <Token var=<ContextVar name='current_context' default={} at was created in a different Context
+        #       https://github.com/open-telemetry/opentelemetry-python/issues/2606
+        "opentelemetry.context": {
+            "handlers": [],
+            "level": "CRITICAL",
+            "propagate": False,
+        },
     },
 }
 

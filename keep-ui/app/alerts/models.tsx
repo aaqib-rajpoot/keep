@@ -1,3 +1,5 @@
+import { Option } from "./alert-presets";
+
 export enum Severity {
   Critical = "critical",
   High = "high",
@@ -7,7 +9,7 @@ export enum Severity {
   Error = "error",
 }
 
-export interface Alert {
+export interface AlertDto {
   id: string;
   name: string;
   status: string;
@@ -25,8 +27,15 @@ export interface Alert {
   pushed: boolean;
   generatorURL?: string;
   fingerprint: string;
-  deleted?: boolean;
-  assignee?: string;
+  deleted: string[];
+  assignees?: { [lastReceived: string]: string };
+  ticket_url: string;
+}
+
+export interface Preset {
+  id?: string;
+  name: string;
+  options: Option[];
 }
 
 export const AlertKnownKeys = [
@@ -58,7 +67,7 @@ export const AlertTableKeys: { [key: string]: string } = {
   Description: "",
   Type: "Whether the alert was pushed or pulled from the alert source",
   Status: "",
-  "Last Received": "",
+  When: "",
   Source: "",
   Assignee: "",
   "Fatigue Meter": "Calculated based on various factors",

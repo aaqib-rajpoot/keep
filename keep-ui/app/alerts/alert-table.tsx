@@ -5,124 +5,223 @@ import {
   TableHeaderCell,
   Icon,
   Callout,
-  Text,
-  Button,
-  Select,
-  SelectItem,
+  CategoryBar,
 } from "@tremor/react";
 import { AlertsTableBody } from "./alerts-table-body";
-import { Alert, AlertTableKeys } from "./models";
-import { useEffect, useState } from "react";
-import { AlertTransition } from "./alert-transition";
+import { AlertDto } from "./models";
 import {
   CircleStackIcon,
   QuestionMarkCircleIcon,
 } from "@heroicons/react/24/outline";
 import { Provider } from "app/providers/providers";
-import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  TableCellsIcon,
-} from "@heroicons/react/20/solid";
 import { User } from "app/settings/models";
 import { User as NextUser } from "next-auth";
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
+import PushPullBadge from "@/components/ui/push-pulled-badge/push-pulled-badge";
+import moment from "moment";
+import Image from "next/image";
+import { Workflow } from "app/workflows/models";
+import { useRouter } from "next/navigation";
+import AlertName from "./alert-name";
+import AlertAssignee from "./alert-assignee";
+import AlertMenu from "./alert-menu";
+import AlertSeverity from "./alert-severity";
+import AlertExtraPayload from "./alert-extra-payload";
+
+const getAlertLastReceieved = (lastRecievedFromAlert: Date) => {
+  let lastReceived = "unknown";
+  if (lastRecievedFromAlert) {
+    lastReceived = lastRecievedFromAlert.toString();
+    try {
+      lastReceived = moment(lastRecievedFromAlert).fromNow();
+    } catch {}
+  }
+  return lastReceived;
+};
+
+const columnHelper = createColumnHelper<AlertDto>();
 
 interface Props {
-  alerts: Alert[];
+  alerts: AlertDto[];
   groupBy?: string;
-  groupedByAlerts?: { [key: string]: Alert[] };
+  groupedByAlerts?: { [key: string]: AlertDto[] };
   workflows?: any[];
   providers?: Provider[];
   mutate?: () => void;
   isAsyncLoading?: boolean;
-  onDelete?: (fingerprint: string, restore?: boolean) => void;
-  setAssignee?: (fingerprint: string, unassign: boolean) => void;
+  onDelete?: (
+    fingerprint: string,
+    lastReceived: Date,
+    restore?: boolean
+  ) => void;
+  setAssignee?: (
+    fingerprint: string,
+    lastReceived: Date,
+    unassign: boolean
+  ) => void;
   users?: User[];
   currentUser: NextUser;
-  deletedCount?: number;
+  openModal?: (alert: AlertDto) => void;
 }
 
 export function AlertTable({
   alerts,
   groupedByAlerts = {},
   groupBy,
-  workflows,
-  providers,
+  workflows = [],
+  providers = [],
   mutate,
   isAsyncLoading = false,
   onDelete,
   setAssignee,
   users = [],
   currentUser,
-  deletedCount = 0,
+  openModal,
 }: Props) {
-  const [selectedAlertHistory, setSelectedAlertHistory] = useState<Alert[]>([]);
-  const [isOpen, setIsOpen] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [defaultPageSize, setDefaultPageSize] = useState(10);
+  const router = useRouter();
 
-  const closeModal = (): any => setIsOpen(false);
-  const openModal = (alert: Alert): any => {
-    setSelectedAlertHistory(groupedByAlerts[(alert as any)[groupBy!]]);
-    setIsOpen(true);
+  const handleWorkflowClick = (workflows: Workflow[]) => {
+    if (workflows.length === 1) {
+      router.push(`workflows/${workflows[0].id}`);
+    } else {
+      router.push("workflows");
+    }
   };
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [alerts]);
-
-  function renderPagination() {
-    if (!defaultPageSize) return null;
-
-    const totalPages = Math.ceil(alerts.length / defaultPageSize);
-    const startItem = (currentPage - 1) * defaultPageSize + 1;
-    const endItem = Math.min(currentPage * defaultPageSize, alerts.length);
-
-    return (
-      <div className="flex justify-between items-center">
-        <Text>
-          Showing {startItem} – {endItem} of {alerts.length}{" "}
-          {deletedCount > 0 && `(there are ${deletedCount} deleted alerts)`}
-        </Text>
-        <div className="flex">
-          <Select
-            value={defaultPageSize.toString()}
-            enableClear={false}
-            onValueChange={(value) => {
-              setDefaultPageSize(parseInt(value));
-              setCurrentPage(1);
-            }}
-            className="mr-2"
-            icon={TableCellsIcon}
-          >
-            <SelectItem value="10">10</SelectItem>
-            <SelectItem value="20">20</SelectItem>
-            <SelectItem value="50">50</SelectItem>
-            <SelectItem value="100">100</SelectItem>
-          </Select>
-          <Button
-            icon={ArrowLeftIcon}
-            onClick={() => setCurrentPage(currentPage - 1)}
-            size="xs"
-            color="orange"
-            variant="secondary"
-            disabled={currentPage === 1}
-          />
-          <Button
-            icon={ArrowRightIcon}
-            onClick={() => setCurrentPage(currentPage + 1)}
-            size="xs"
-            disabled={currentPage === totalPages}
-            color="orange"
-            variant="secondary"
+  const columns = [
+    columnHelper.display({
+      id: "alertMenu",
+      cell: (context) => (
+        <div className="pb-6">
+          <AlertMenu
+            alert={context.row.original}
+            canOpenHistory={
+              !groupedByAlerts![(context.row.original as any)[groupBy!]]
+            }
+            openHistory={() => openModal!(context.row.original)}
+            provider={providers.find(
+              (p) => p.type === context.row.original.source![0]
+            )}
+            mutate={mutate}
+            callDelete={onDelete}
+            setAssignee={setAssignee}
+            currentUser={currentUser}
           />
         </div>
-      </div>
-    );
-  }
+      ),
+    }),
+    columnHelper.accessor("severity", {
+      header: () => "Severity",
+      cell: (context) => <AlertSeverity severity={context.getValue()} />,
+    }),
+    columnHelper.accessor("name", {
+      header: () => "Name",
+      cell: (context) => (
+        <AlertName
+          alert={context.row.original}
+          workflows={workflows}
+          handleWorkflowClick={handleWorkflowClick}
+        />
+      ),
+    }),
+    columnHelper.accessor("description", {
+      header: () => "Description",
+      cell: (context) => (
+        <div
+          className="max-w-[340px] flex items-center"
+          title={context.getValue()}
+        >
+          <div className="truncate">{context.getValue()}</div>
+        </div>
+      ),
+    }),
+    columnHelper.accessor("pushed", {
+      header: () => (
+        <div className="flex items-center gap-1">
+          <span>Pushed</span>
+          <Icon
+            icon={QuestionMarkCircleIcon}
+            tooltip="Whether the alert was pushed or pulled from the alert source"
+            variant="simple"
+            color="gray"
+          />
+        </div>
+      ),
+      cell: (context) => <PushPullBadge pushed={context.getValue()} />,
+    }),
+    columnHelper.accessor("status", {
+      header: "Status",
+    }),
+    columnHelper.accessor("lastReceived", {
+      header: "When",
+      cell: (context) => getAlertLastReceieved(context.getValue()),
+    }),
+    columnHelper.accessor("source", {
+      header: "Source",
+      cell: (context) =>
+        (context.getValue() ?? []).map((source, index) => (
+          <Image
+            className={`inline-block ${index == 0 ? "" : "-ml-2"}`}
+            key={source}
+            alt={source}
+            height={24}
+            width={24}
+            title={source}
+            src={`/icons/${source}-icon.png`}
+          />
+        )),
+    }),
+    columnHelper.accessor("assignees", {
+      header: "Assignee",
+      cell: (context) => (
+        <AlertAssignee
+          assignee={
+            (context.getValue() ?? {})[
+              context.row.original.lastReceived?.toISOString()
+            ]
+          }
+          users={users}
+        />
+      ),
+    }),
+    columnHelper.accessor("fatigueMeter", {
+      header: () => (
+        <div className="flex items-center gap-1">
+          <span>Fatigue Meter</span>
+          <Icon
+            icon={QuestionMarkCircleIcon}
+            tooltip="Calculated based on various factors"
+            variant="simple"
+            color="gray"
+          />
+        </div>
+      ),
+      cell: (context) => (
+        <CategoryBar
+          values={[40, 30, 20, 10]}
+          colors={["emerald", "yellow", "orange", "rose"]}
+          markerValue={context.getValue() ?? 0}
+          tooltip={(context.getValue() ?? 0).toString() ?? "0"}
+          className="min-w-[192px]"
+        />
+      ),
+    }),
+    columnHelper.display({
+      id: "extraPayload",
+      cell: (context) => <AlertExtraPayload alert={context.row.original} />,
+    }),
+  ];
 
-  const startIndex = (currentPage - 1) * defaultPageSize;
-  const endIndex = startIndex + defaultPageSize;
+  const table = useReactTable({
+    data: alerts,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  });
 
   return (
     <>
@@ -138,50 +237,21 @@ export function AlertTable({
       )}
       <Table>
         <TableHead>
-          <TableRow>
-            {<TableHeaderCell>{/** Menu */}</TableHeaderCell>}
-            {Object.keys(AlertTableKeys).map((key) => (
-              <TableHeaderCell key={key}>
-                <div className="flex items-center">
-                  {key}{" "}
-                  {AlertTableKeys[key] !== "" && (
-                    <Icon
-                      icon={QuestionMarkCircleIcon}
-                      tooltip={AlertTableKeys[key]}
-                      variant="simple"
-                      color="gray"
-                    />
-                  )}{" "}
-                </div>
-              </TableHeaderCell>
-            ))}
-          </TableRow>
+          {table.getHeaderGroups().map((headerGroup) => (
+            <TableRow key={headerGroup.id}>
+              {headerGroup.headers.map((header) => (
+                <TableHeaderCell key={header.id}>
+                  {flexRender(
+                    header.column.columnDef.header,
+                    header.getContext()
+                  )}
+                </TableHeaderCell>
+              ))}
+            </TableRow>
+          ))}
         </TableHead>
-        <AlertsTableBody
-          alerts={alerts
-            .sort((a, b) => b.lastReceived.getTime() - a.lastReceived.getTime())
-            .slice(startIndex, endIndex)}
-          groupBy={groupBy}
-          groupedByData={groupedByAlerts}
-          openModal={openModal}
-          workflows={workflows}
-          providers={providers}
-          mutate={mutate}
-          showSkeleton={isAsyncLoading}
-          onDelete={onDelete}
-          setAssignee={setAssignee}
-          users={users}
-          currentUser={currentUser}
-        />
+        <AlertsTableBody table={table} showSkeleton={isAsyncLoading} />
       </Table>
-      {renderPagination()}
-      <AlertTransition
-        isOpen={isOpen}
-        closeModal={closeModal}
-        data={selectedAlertHistory}
-        users={users}
-        currentUser={currentUser}
-      />
     </>
   );
 }

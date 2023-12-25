@@ -302,6 +302,7 @@ def delete_provider(
 def validate_scopes(
     provider: BaseProvider, validate_mandatory=True
 ) -> dict[str, bool | str]:
+    logger.info("Validating provider scopes")
     validated_scopes = provider.validate_scopes()
     if validate_mandatory:
         mandatory_scopes_validated = True
@@ -316,10 +317,17 @@ def validate_scopes(
                     break
         # Otherwise we fail the installation
         if not mandatory_scopes_validated:
+            logger.warning(
+                "Failed to validate mandatory provider scopes",
+                extra={"validated_scopes": validated_scopes},
+            )
             raise HTTPException(
                 status_code=412,
                 detail=validated_scopes,
             )
+    logger.info(
+        "Validated provider scopes", extra={"validated_scopes": validated_scopes}
+    )
     return validated_scopes
 
 
@@ -675,6 +683,7 @@ def install_provider_webhook(
     webhook_api_key = get_or_create_api_key(
         session=session,
         tenant_id=tenant_id,
+        created_by="system",
         unique_api_key_id="webhook",
         system_description="Webhooks API key",
     )
@@ -702,6 +711,7 @@ def get_webhook_settings(
     webhook_api_key = get_or_create_api_key(
         session=session,
         tenant_id=tenant_id,
+        created_by="system",
         unique_api_key_id="webhook",
         system_description="Webhooks API key",
     )

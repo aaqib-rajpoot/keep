@@ -15,7 +15,7 @@ from pusher import Pusher
 from sqlmodel import Session
 
 from keep.api.core.config import AuthenticationType
-from keep.api.core.db import get_api_key, get_session
+from keep.api.core.db import get_api_key, get_session, get_user_by_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -33,35 +33,45 @@ SINGLE_TENANT_EMAIL = "admin@keephq"
 
 
 def get_user_email(request: Request) -> str | None:
-    token = request.headers.get("Authorization")
-    if token:
-        token = token.split(" ")[1]
-        decoded_token = jwt.decode(token, options={"verify_signature": False})
-        return decoded_token.get("email")
-    elif "x-api-key" in request.headers:
-        return "apikey@keephq.dev"
-    else:
-        raise HTTPException(
-            status_code=401, detail="Invalid authentication credentials"
-        )
+    from opentelemetry import trace
+
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("get_user_email"):
+        token = request.headers.get("Authorization")
+        if token:
+            token = token.split(" ")[1]
+            decoded_token = jwt.decode(token, options={"verify_signature": False})
+            return decoded_token.get("email")
+        elif "x-api-key" in request.headers:
+            username = get_user_by_api_key(request.headers["x-api-key"])
+            return username
+        else:
+            raise HTTPException(
+                status_code=401, detail="Invalid authentication credentials"
+            )
 
 
-def verify_api_key(
-    request: Request,
-    api_key: str = Security(auth_header),
-    authorization: HTTPAuthorizationCredentials = Security(http_basic),
+def __extract_api_key(
+    request: Request, api_key: str, authorization: HTTPAuthorizationCredentials
 ) -> str:
     """
-    Verifies that a customer is allowed to access the API.
+    Extracts the API key from the request.
+    API key can be passed in the following ways:
+    1. X-API-KEY header
+    2. api_key query param
+    3. Basic auth header
+    4. Digest auth header
 
     Args:
-        api_key (str, optional): The API key extracted from X-API-KEY header. Defaults to Security(auth_header).
+        request (Request): FastAPI request object
+        api_key (str): The API key extracted from X-API-KEY header
+        authorization (HTTPAuthorizationCredentials): The credentials extracted from the Authorization header
 
     Raises:
         HTTPException: 401 if the user is unauthorized.
 
     Returns:
-        str: The tenant id.
+        str: api key
     """
     api_key = api_key or request.query_params.get("api_key", None)
     if not api_key:
@@ -97,6 +107,27 @@ def verify_api_key(
                 api_key = credentials
         else:
             raise HTTPException(status_code=401, detail="Missing API Key")
+    return api_key
+
+
+def verify_api_key(
+    request: Request,
+    api_key: str = Security(auth_header),
+    authorization: HTTPAuthorizationCredentials = Security(http_basic),
+) -> str:
+    """
+    Verifies that a customer is allowed to access the API.
+
+    Args:
+        api_key (str, optional): The API key extracted from X-API-KEY header. Defaults to Security(auth_header).
+
+    Raises:
+        HTTPException: 401 if the user is unauthorized.
+
+    Returns:
+        str: The tenant id.
+    """
+    api_key = __extract_api_key(request, api_key, authorization)
 
     tenant_api_key = get_api_key(api_key)
     if not tenant_api_key:
@@ -106,34 +137,42 @@ def verify_api_key(
     return tenant_api_key.tenant_id
 
 
+# init once so the cache will actually work
+auth_domain = os.environ.get("AUTH0_DOMAIN")
+if auth_domain:
+    jwks_uri = f"https://{auth_domain}/.well-known/jwks.json"
+    jwks_client = jwt.PyJWKClient(jwks_uri, cache_keys=True)
+
+
 def verify_bearer_token(token: str = Depends(oauth2_scheme)) -> str:
     # Took the implementation from here:
     #   https://github.com/auth0-developer-hub/api_fastapi_python_hello-world/blob/main/application/json_web_token.py
-    if not token:
-        raise HTTPException(status_code=401, detail="No token provided 👈")
-    try:
-        auth_domain = os.environ.get("AUTH0_DOMAIN")
-        auth_audience = os.environ.get("AUTH0_AUDIENCE")
-        jwks_uri = f"https://{auth_domain}/.well-known/jwks.json"
-        issuer = f"https://{auth_domain}/"
-        jwks_client = jwt.PyJWKClient(jwks_uri)
-        jwt_signing_key = jwks_client.get_signing_key_from_jwt(token).key
-        payload = jwt.decode(
-            token,
-            jwt_signing_key,
-            algorithms="RS256",
-            audience=auth_audience,
-            issuer=issuer,
-            leeway=60,
-        )
-        tenant_id = payload.get("keep_tenant_id")
-        return tenant_id
-    except jwt.exceptions.DecodeError:
-        logger.exception("Failed to decode token")
-        raise HTTPException(status_code=401, detail="Token is not a valid JWT")
-    except Exception as e:
-        logger.exception("Failed to validate token")
-        raise HTTPException(status_code=401, detail=str(e))
+    from opentelemetry import trace
+
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("verify_bearer_token"):
+        if not token:
+            raise HTTPException(status_code=401, detail="No token provided 👈")
+        try:
+            auth_audience = os.environ.get("AUTH0_AUDIENCE")
+            issuer = f"https://{auth_domain}/"
+            jwt_signing_key = jwks_client.get_signing_key_from_jwt(token).key
+            payload = jwt.decode(
+                token,
+                jwt_signing_key,
+                algorithms="RS256",
+                audience=auth_audience,
+                issuer=issuer,
+                leeway=60,
+            )
+            tenant_id = payload.get("keep_tenant_id")
+            return tenant_id
+        except jwt.exceptions.DecodeError:
+            logger.exception("Failed to decode token")
+            raise HTTPException(status_code=401, detail="Token is not a valid JWT")
+        except Exception as e:
+            logger.exception("Failed to validate token")
+            raise HTTPException(status_code=401, detail=str(e))
 
 
 def get_user_email_single_tenant(request: Request) -> str:
@@ -185,6 +224,8 @@ def verify_api_key_single_tenant(
     ):
         return SINGLE_TENANT_UUID
 
+    api_key = __extract_api_key(request, api_key, authorization)
+
     tenant_api_key = get_api_key(api_key)
     if not tenant_api_key:
         raise HTTPException(status_code=401, detail="Invalid API Key")
@@ -226,6 +267,12 @@ def verify_token_or_key_single_tenant(
     authorization: Optional[HTTPAuthorizationCredentials] = Security(http_basic),
     token: Optional[str] = Depends(oauth2_scheme),
 ) -> str:
+    # if we don't want to use authentication, return the single tenant id
+    if (
+        os.environ.get("AUTH_TYPE", AuthenticationType.NO_AUTH.value)
+        == AuthenticationType.NO_AUTH.value
+    ):
+        return SINGLE_TENANT_UUID
     # Attempt to verify API Key first
     if api_key:
         try:
@@ -246,7 +293,10 @@ def verify_token_or_key_single_tenant(
             )
 
 
-def get_pusher_client() -> Pusher:
+def get_pusher_client() -> Pusher | None:
+    if os.environ.get("PUSHER_DISABLED", "false") == "true":
+        return None
+
     # TODO: defaults on open source no docker
     return Pusher(
         host=os.environ.get("PUSHER_HOST"),

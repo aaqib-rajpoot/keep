@@ -503,7 +503,7 @@ class DatadogProvider(BaseProvider):
                         groups=event.monitor_groups,
                         source=["datadog"],
                         tags=tags,
-                        environment=tags.get("environment"),
+                        environment=tags.get("environment", "undefined"),
                         service=tags.get("service"),
                         created_by=monitor.creator.email
                         if monitor and monitor.creator
@@ -631,9 +631,11 @@ class DatadogProvider(BaseProvider):
         tags_list.remove("monitor")
         tags = {k: v for k, v in map(lambda tag: tag.split(":"), tags_list)}
         event_time = datetime.datetime.fromtimestamp(
-            int(event.get("last_updated")) / 1000
+            int(event.get("last_updated")) / 1000, tz=datetime.timezone.utc
         )
-        severity, status, title = event.get("title").split(" ", 2)
+        title = event.get("title")
+        status = event.get("alert_transition")
+        severity = event.get("severity")
         url = event.pop("url", None)
 
         # https://docs.datadoghq.com/integrations/webhooks/#variables
@@ -646,14 +648,12 @@ class DatadogProvider(BaseProvider):
         alert = AlertDto(
             id=event.get("id"),
             name=title,
-            status=status.lstrip("[").rstrip("]"),
+            status=status,
             lastReceived=str(event_time),
             source=["datadog"],
             message=event.get("body"),
             groups=groups,
-            severity=DatadogProvider.__get_parsed_severity(
-                event.get("severity", severity)
-            ),
+            severity=DatadogProvider.__get_parsed_severity(severity),
             url=url,
             tags=tags,
             monitor_id=event.get("monitor_id"),

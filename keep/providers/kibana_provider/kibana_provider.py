@@ -135,6 +135,14 @@ class KibanaProvider(BaseProvider):
     ):
         super().__init__(context_manager, provider_id, config)
 
+    @staticmethod
+    def parse_event_raw_body(raw_body: bytes) -> bytes:
+        # tb: this is a f**king stupid hack because Kibana doesn't escape {{#toJson}} :(
+        if b'"payload": "{' in raw_body:
+            raw_body = raw_body.replace(b'"payload": "{', b'"payload": {')
+            raw_body = raw_body.replace(b'}",', b"},")
+        return raw_body
+
     def validate_scopes(self) -> dict[str, bool | str]:
         """
         Validate the scopes of the provider.
@@ -365,7 +373,7 @@ class KibanaProvider(BaseProvider):
                     "params": {},
                     "headers": {},
                     "auth": {"basic": {"username": "keep", "password": api_key}},
-                    "body": '{"payload": {{#toJson}}ctx{{/toJson}}, "status": "Alert"}',
+                    "body": '{"payload": "{{#toJson}}ctx{{/toJson}}", "status": "Alert"}',
                 }
             }
             self.request(
@@ -423,18 +431,19 @@ class KibanaProvider(BaseProvider):
 
     @staticmethod
     def format_alert_from_watcher(event: dict) -> AlertDto | list[AlertDto]:
-        alert_id = event.get("payload", {}).pop("id")
-        alert_name = event.get("payload", {}).get("metadata", {}).get("name")
-        last_received = (
-            event.get("payload", {})
-            .get("trigger", {})
-            .get("triggered_time", datetime.datetime.now().isoformat())
+        payload = event.get("payload", {})
+        alert_id = payload.pop("id")
+        alert_metadata = payload.get("metadata", {})
+        alert_name = alert_metadata.get("name") if alert_metadata else alert_id
+        last_received = payload.get("trigger", {}).get(
+            "triggered_time",
+            datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
         )
         status = event.pop("status", "Alert")
         return AlertDto(
             id=alert_id,
             name=alert_name,
-            fingerprint=event.get("payload", {}).get("watch_id", alert_id),
+            fingerprint=payload.get("watch_id", alert_id),
             status=status,
             lastReceived=last_received,
             source=["kibana"],
@@ -456,17 +465,26 @@ class KibanaProvider(BaseProvider):
         # If this is coming from Kibana Watcher
         if "payload" in event:
             return KibanaProvider.format_alert_from_watcher(event)
-
-        labels = {
-            v.split("=", 1)[0]: v.split("=", 1)[1]
-            for v in event.get("ruleTags", "").split(",")
-        }
-        labels.update(
-            {
+        try:
+            labels = {
                 v.split("=", 1)[0]: v.split("=", 1)[1]
-                for v in event.get("contextTags", "").split(",")
+                for v in event.get("ruleTags", "").split(",")
             }
-        )
+        except Exception:
+            # Failed to extract labels from ruleTags
+            labels = {}
+
+        try:
+            labels.update(
+                {
+                    v.split("=", 1)[0]: v.split("=", 1)[1]
+                    for v in event.get("contextTags", "").split(",")
+                }
+            )
+        except Exception:
+            # Failed to enrich labels with contextTags
+            pass
+
         environment = labels.get("environment", "undefined")
         return AlertDto(
             environment=environment, labels=labels, source=["kibana"], **event

@@ -22,13 +22,20 @@ class AlertDto(BaseModel):
     fingerprint: str | None = (
         None  # The fingerprint of the alert (used for alert de-duplication)
     )
-    deleted: bool = False  # Whether the alert is deleted or not
+    deleted: list[str] = []  # Whether the alert is deleted or not
 
     @validator("fingerprint", pre=True, always=True)
     def assign_fingerprint_if_none(cls, fingerprint, values):
         if fingerprint is None:
             return values.get("name", "")
         return fingerprint
+
+    @validator("deleted", pre=True, always=True)
+    def validate_old_deleted(cls, deleted, values):
+        """This is a temporary validator to handle the old deleted field"""
+        if isinstance(deleted, bool):
+            return []
+        return deleted
 
     class Config:
         extra = Extra.allow
@@ -44,21 +51,24 @@ class AlertDto(BaseModel):
                     "duplicateReason": None,
                     "service": "backend",
                     "source": ["keep"],
-                    "message": "Alert message",
-                    "description": "Alert description",
+                    "message": "Keep: Alert message",
+                    "description": "Keep: Alert description",
                     "severity": "critical",
                     "fatigueMeter": 0,
                     "pushed": True,
                     "event_id": "1234",
-                    "url": "https://www.google.com/search?q=open+source+alert+management",
-                    "fingerprint": "Alert name",
+                    "url": "https://www.keephq.dev?alertId=1234",
+                    "labels": {"key": "value"},
+                    "ticket_url": "https://www.keephq.dev?enrichedTicketId=456",
+                    "fingerprint": "1234",
                 }
             ]
         }
 
 
 class DeleteRequestBody(BaseModel):
-    fingerprint: str | None = None
+    fingerprint: str
+    lastReceived: str
     restore: bool = False
 
 

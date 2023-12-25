@@ -4,6 +4,7 @@ Kafka Provider is a class that allows to ingest/digest data from Grafana.
 import base64
 import dataclasses
 import datetime
+import json
 import logging
 import os
 import random
@@ -74,6 +75,7 @@ class DynatraceProvider(BaseProvider):
             alias="Settings Write",
         ),
     ]
+    FINGERPRINT_FIELDS = ["id"]
 
     def __init__(
         self, context_manager: ContextManager, provider_id: str, config: ProviderConfig
@@ -215,8 +217,8 @@ class DynatraceProvider(BaseProvider):
                 severity=event.get("ProblemSeverity", None),
                 lastReceived=datetime.datetime.now().isoformat(),
                 fatigueMeter=random.randint(0, 100),
-                description=event.get(
-                    "ImpactedEntities"
+                description=json.dumps(
+                    event.get("ImpactedEntities", {})
                 ),  # was asked by a user (should be configurable)
                 source=["dynatrace"],
                 impact=event.get("ProblemImpact"),
@@ -233,7 +235,7 @@ class DynatraceProvider(BaseProvider):
             )
         # else, problem from the problem API
         else:
-            event.pop("problemId")
+            _id = event.pop("problemId")
             name = event.pop("displayId")
             status = event.pop("status")
             severity = event.pop("severityLevel", None)
@@ -241,13 +243,16 @@ class DynatraceProvider(BaseProvider):
             impact = event.pop("impactLevel")
             tags = event.pop("entityTags")
             impacted_entities = event.pop("impactedEntities", [])
-            url = event.pop("ProblemURL")
+            url = event.pop("ProblemURL", None)
+            lastReceived = datetime.datetime.fromtimestamp(
+                event.pop("startTime") / 1000, tz=datetime.timezone.utc
+            )
             alert_dto = AlertDto(
-                id=id,
+                id=_id,
                 name=name,
                 status=status,
                 severity=severity,
-                lastReceived=datetime.datetime.now().isoformat(),
+                lastReceived=lastReceived.isoformat(),
                 fatigueMeter=random.randint(0, 100),
                 description=description,
                 source=["dynatrace"],
@@ -257,6 +262,9 @@ class DynatraceProvider(BaseProvider):
                 url=url,
                 **event,  # any other field
             )
+        alert_dto.fingerprint = DynatraceProvider.get_alert_fingerprint(
+            alert_dto, DynatraceProvider.FINGERPRINT_FIELDS
+        )
         return alert_dto
 
     def _get_alerting_profiles(self):
@@ -336,7 +344,7 @@ class DynatraceProvider(BaseProvider):
                 "notifyClosedProblems": True,
                 "notifyEventMergesEnabled": True,
                 # all the fields - https://docs.dynatrace.com/docs/observe-and-explore/notifications-and-alerting/problem-notifications/webhook-integration#example-json-with-placeholders
-                "payload": '{\n"State":"{State}",\n"ProblemID":"{ProblemID}",\n"ProblemTitle":"{ProblemTitle}",\n"ImpactedEntities": {ImpactedEntities},\n "PID": "{PID}",\n "ProblemDetailsJSON": {ProblemDetailsJSON},\n "ProblemImpact" : "{ProblemImpact}",\n"ProblemSeverity": "{ProblemSeverity}",\n "ProblemURL": "{ProblemURL}",\n"State": "{State}",\n"Tags": "{Tags}"\n"ProblemDetails": "{ProblemDetailsText}"\n"NamesOfImpactedEntities": "{NamesOfImpactedEntities}"\n"ImpactedEntity": "{ImpactedEntity}"\n"ImpactedEntityNames": "{ImpactedEntityNames}"\n"ProblemDetailsJSONv2": {ProblemDetailsJSONv2}\n\n}',
+                "payload": '{\n"State":"{State}",\n"ProblemID":"{ProblemID}",\n"ProblemTitle":"{ProblemTitle}",\n"ImpactedEntities": {ImpactedEntities},\n "PID": "{PID}",\n "ProblemDetailsJSON": {ProblemDetailsJSON},\n "ProblemImpact" : "{ProblemImpact}",\n"ProblemSeverity": "{ProblemSeverity}",\n "ProblemURL": "{ProblemURL}",\n"State": "{State}",\n"Tags": "{Tags}",\n"ProblemDetails": "{ProblemDetailsText}",\n"NamesOfImpactedEntities": "{NamesOfImpactedEntities}",\n"ImpactedEntity": "{ImpactedEntity}",\n"ImpactedEntityNames": "{ImpactedEntityNames}",\n"ProblemDetailsJSONv2": {ProblemDetailsJSONv2}\n}',
             },
         }
         actual_payload = [
